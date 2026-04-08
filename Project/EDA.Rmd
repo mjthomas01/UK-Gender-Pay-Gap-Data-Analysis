@@ -1,0 +1,72 @@
+---
+title: "EDA"
+author: "Melvin Jiji Thomas"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,         # Show the code
+  warning = FALSE,    # Hide warnings 
+  message = FALSE     # Hide messages
+  )
+```
+
+```{r}
+
+library(readxl)    
+library(tidyverse)
+
+```
+
+```{r load file function}
+
+load_gpg_table <- function(filename, sheet = "All") {
+  
+raw <- read_excel(
+    path      = filename,
+    sheet     = sheet,
+    skip      = 3,      # skip the first 3 rows (blank + merged header rows)
+    col_names = TRUE    # row 4 becomes our column names
+  )
+
+raw <- raw[, 1:4]
+colnames(raw) <- c("description", "code", "gpg_median", "gpg_mean")
+
+raw <- raw %>%
+    filter(!is.na(description)) %>%
+    filter(!str_starts(description, "\\^")) %>%
+    filter(!str_starts(description, "Source")) %>%
+    filter(!str_starts(description, "Key")) %>%
+    filter(!str_starts(description, "Estimates")) %>%
+    filter(!str_starts(description, "x ="))
+raw <- raw %>%
+    mutate(
+      gpg_median = as.numeric(gpg_median),
+      gpg_mean   = as.numeric(gpg_mean)
+    )
+raw <- raw %>%
+    mutate(description = str_trim(description))
+  
+  return(raw)
+}
+
+```
+
+```{r load data}
+
+data_path <- "D:/Maynooth/M.Sc Final Project/DataSet/ashegenderpaygap2025provisional/"
+
+df_total      <- load_gpg_table(paste0(data_path, "PROV - Total Table 1.12  Gender pay gap 2025.xlsx"))
+df_age        <- load_gpg_table(paste0(data_path, "PROV - Age Group Table 6.12  Gender pay gap 2025.xlsx"))
+df_occupation <- load_gpg_table(paste0(data_path, "PROV - Occupation SOC20 (2) Table 2.12  Gender pay gap 2025.xlsx"))
+df_industry   <- load_gpg_table(paste0(data_path, "PROV - SIC07 Industry (2) SIC2007 Table 4.12  Gender pay gap 2025.xlsx"))
+df_pubpriv    <- load_gpg_table(paste0(data_path, "PROV - PubPriv Table 13.12  Gender pay gap 2025.xlsx"))
+df_region     <- load_gpg_table(paste0(data_path, "PROV - Work Geography Table 7.12  Gender pay gap 2025.xlsx"))
+
+glimpse(df_age)        # shows column types and first few values
+head(df_age)           # shows first 6 rows
+nrow(df_age) 
+
+```
