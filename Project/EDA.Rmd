@@ -1,72 +1,388 @@
 ---
-title: "EDA"
-author: "Melvin Jiji Thomas"
+title: "UK Gender Pay Gap 2025 — Exploratory Data Analysis"
+author: "Your Name"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+    fig_width: 9
+    fig_height: 5
 ---
 
 ```{r setup, include=FALSE}
+# include=FALSE means this chunk runs but nothing is shown in the report
+
 knitr::opts_chunk$set(
-  echo = TRUE,         # Show the code
-  warning = FALSE,    # Hide warnings 
-  message = FALSE     # Hide messages
-  )
+  echo    = TRUE,     # show code by default (user can hide with code_folding)
+  warning = FALSE,    # suppress warnings from appearing in the report
+  message = FALSE,    # suppress messages (e.g. from source())
+  fig.align = "center"
+)
 ```
 
-```{r}
+---
 
-library(readxl)    
+# 1. Introduction
+
+This report presents an exploratory data analysis (EDA) of the UK Gender Pay 
+Gap (GPG) using data from the **Annual Survey of Hours and Earnings (ASHE)**, 
+published by the Office for National Statistics (ONS) in 2025.
+
+The gender pay gap is defined as the difference between men's and women's mean 
+or median hourly pay, expressed as a percentage of men's pay:
+
+$$GPG = \frac{\text{Men's pay} - \text{Women's pay}}{\text{Men's pay}} \times 100$$
+
+A **positive** value indicates men earn more than women. A **negative** value 
+indicates women earn more than men.
+
+The analysis examines the GPG across five dimensions:
+
+- Employment type (all employees, full-time, part-time)
+- Age group
+- Industry sector (SIC 2007)
+- Occupation group (SOC 2020)
+- UK region and nation
+- Public vs private sector
+
+---
+# 2. Data & Methodology
+
+## 2.1 Data source
+
+The dataset is drawn from 25 ONS ASHE 2025 tables, each covering a different 
+analytical dimension. The data is **aggregated at the group level** — it does 
+not contain individual employee records. Each table provides median and mean 
+hourly GPG figures, with separate sheets for all employees, full-time 
+employees, and part-time employees.
+
+Cells marked `x` in the source files indicate suppressed estimates where the 
+ONS deemed the sample size insufficient for reliable publication. These were 
+treated as missing values (`NA`) throughout the analysis.
+
+## 2.2 Data loading & cleaning
+
+```{r load-data}
 library(tidyverse)
+library(broom)
+library(scales)
+library(patchwork)
 
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+source("DataLoading.R")
+source("DataCleaning.R")
 ```
 
-```{r load file function}
 
-load_gpg_table <- function(filename, sheet = "All") {
-  
-raw <- read_excel(
-    path      = filename,
-    sheet     = sheet,
-    skip      = 3,      # skip the first 3 rows (blank + merged header rows)
-    col_names = TRUE    # row 4 becomes our column names
-  )
+```{r cleaning-summary}
+# Summary of the cleaned datasets
+tribble(
+  ~Dataset,         ~Rows, ~Dimensions,                      ~NAs,
+  "df_age_clean",        nrow(df_age_clean),        "8 age groups × 3 emp types",   sum(is.na(df_age_clean$gpg_median)),
+  "df_industry_clean",   nrow(df_industry_clean),   "19 industries × 3 emp types",  sum(is.na(df_industry_clean$gpg_median)),
+  "df_occupation_clean", nrow(df_occupation_clean), "9 occupations × 3 emp types",  sum(is.na(df_occupation_clean$gpg_median)),
+  "df_pubpriv_clean",    nrow(df_pubpriv_clean),    "3 sectors × 3 emp types",       sum(is.na(df_pubpriv_clean$gpg_median)),
+  "df_region_clean",     nrow(df_region_clean),     "12 regions × 3 emp types",      sum(is.na(df_region_clean$gpg_median))
+) %>%
+  knitr::kable(caption = "Table 1: Summary of cleaned datasets")
+```
 
-raw <- raw[, 1:4]
-colnames(raw) <- c("description", "code", "gpg_median", "gpg_mean")
 
-raw <- raw %>%
-    filter(!is.na(description)) %>%
-    filter(!str_starts(description, "\\^")) %>%
-    filter(!str_starts(description, "Source")) %>%
-    filter(!str_starts(description, "Key")) %>%
-    filter(!str_starts(description, "Estimates")) %>%
-    filter(!str_starts(description, "x ="))
-raw <- raw %>%
-    mutate(
-      gpg_median = as.numeric(gpg_median),
-      gpg_mean   = as.numeric(gpg_mean)
+# 3. Headline Findings
+
+## 3.1 Overall gender pay gap
+
+```{r headline-metrics}
+overall <- df_age_clean %>%
+  filter(emp_type == "All", description == "All employees")
+
+ft <- df_age_clean %>%
+  filter(emp_type == "Full-Time", description == "All employees")
+
+pt <- df_age_clean %>%
+  filter(emp_type == "Part-Time", description == "All employees")
+```
+
+The overall UK median GPG in 2025 is 
+**`r overall$gpg_median`%** (mean: **`r overall$gpg_mean`%**).
+
+For **full-time** employees the median gap narrows to 
+**`r ft$gpg_median`%**, while for **part-time** employees it is 
+**`r pt$gpg_median`%** — a negative figure, meaning women in part-time 
+roles earn *more* than men on the median.
+
+```{r plot-overall, fig.cap="Figure 1: Overall GPG by employment type"}
+# Shared colour palette
+COL_MEDIAN <- "#378ADD"
+COL_MEAN   <- "#D85A30"
+COL_POS    <- "#E24B4A"
+COL_NEG    <- "#1D9E75"
+COL_ALL    <- "#378ADD"
+COL_FT     <- "#1D9E75"
+COL_PT     <- "#BA7517"
+
+theme_gpg <- function() {
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title       = element_text(size = 14, face = "bold",
+                                      margin = margin(b = 6)),
+      plot.subtitle    = element_text(size = 11, colour = "grey40",
+                                      margin = margin(b = 12)),
+      plot.caption     = element_text(size = 9,  colour = "grey50",
+                                      margin = margin(t = 10)),
+      axis.title       = element_text(size = 11, colour = "grey30"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(colour = "grey92"),
+      legend.position  = "bottom",
+      legend.title     = element_blank()
     )
-raw <- raw %>%
-    mutate(description = str_trim(description))
-  
-  return(raw)
 }
 
+p1_data <- df_age_clean %>%
+  filter(description == "All employees") %>%
+  select(emp_type, gpg_median, gpg_mean) %>%
+  pivot_longer(cols = c(gpg_median, gpg_mean),
+               names_to = "metric", values_to = "value") %>%
+  mutate(
+    metric   = recode(metric,
+                      gpg_median = "Median GPG",
+                      gpg_mean   = "Mean GPG"),
+    emp_type = factor(emp_type,
+                      levels = c("All", "Full-Time", "Part-Time"))
+  )
+
+ggplot(p1_data, aes(x = emp_type, y = value, fill = metric)) +
+  geom_col(position = "dodge", width = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_text(aes(label = paste0(round(value, 1), "%"),
+                vjust = ifelse(value >= 0, -0.4, 1.3)),
+            position = position_dodge(width = 0.6), size = 3.5) +
+  scale_fill_manual(values = c("Median GPG" = COL_MEDIAN,
+                               "Mean GPG"   = COL_MEAN)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title    = "UK gender pay gap by employment type, 2025",
+    subtitle = "Positive = men earn more; negative = women earn more",
+    x        = "Employment type",
+    y        = "Gender pay gap (%)",
+    caption  = "Source: ONS ASHE 2025"
+  ) +
+  theme_gpg()
 ```
 
-```{r load data}
+> **Key finding:** The overall gap (12.8% median) is nearly double the 
+> full-time gap (6.9%), suggesting the gap is substantially driven by the 
+> concentration of women in part-time roles rather than pay inequality 
+> within comparable roles.
 
-data_path <- "D:/Maynooth/M.Sc Final Project/DataSet/ashegenderpaygap2025provisional/"
+# 4. GPG by Age Group
 
-df_total      <- load_gpg_table(paste0(data_path, "PROV - Total Table 1.12  Gender pay gap 2025.xlsx"))
-df_age        <- load_gpg_table(paste0(data_path, "PROV - Age Group Table 6.12  Gender pay gap 2025.xlsx"))
-df_occupation <- load_gpg_table(paste0(data_path, "PROV - Occupation SOC20 (2) Table 2.12  Gender pay gap 2025.xlsx"))
-df_industry   <- load_gpg_table(paste0(data_path, "PROV - SIC07 Industry (2) SIC2007 Table 4.12  Gender pay gap 2025.xlsx"))
-df_pubpriv    <- load_gpg_table(paste0(data_path, "PROV - PubPriv Table 13.12  Gender pay gap 2025.xlsx"))
-df_region     <- load_gpg_table(paste0(data_path, "PROV - Work Geography Table 7.12  Gender pay gap 2025.xlsx"))
+```{r plot-age, fig.cap="Figure 2: Median GPG by age group"}
+p2_data <- df_age_clean %>%
+  filter(emp_type == "All", description != "All employees")
 
-glimpse(df_age)        # shows column types and first few values
-head(df_age)           # shows first 6 rows
-nrow(df_age) 
-
+ggplot(p2_data, aes(x = description, y = gpg_median, fill = gpg_median)) +
+  geom_col(show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_text(aes(label = paste0(round(gpg_median, 1), "%"),
+                vjust = -0.4), size = 3.5) +
+  scale_fill_gradient2(low = COL_NEG, mid = "grey90",
+                       high = COL_POS, midpoint = 0) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(-2, 23)) +
+  labs(
+    title    = "Gender pay gap by age group, 2025 (all employees, median)",
+    subtitle = "The gap rises steeply from the 30s — consistent with the motherhood penalty",
+    x        = "Age group",
+    y        = "Median GPG (%)",
+    caption  = "Source: ONS ASHE 2025"
+  ) +
+  theme_gpg()
 ```
+
+```{r plot-age-compare, fig.cap="Figure 3: GPG by age group and employment type"}
+df_age_clean %>%
+  filter(description != "All employees") %>%
+  mutate(emp_type = factor(emp_type,
+                           levels = c("All", "Full-Time", "Part-Time"))) %>%
+  ggplot(aes(x = description, y = gpg_median,
+             colour = emp_type, group = emp_type)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c("All"       = COL_ALL,
+                                 "Full-Time" = COL_FT,
+                                 "Part-Time" = COL_PT)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title    = "GPG by age group and employment type, 2025",
+    subtitle = "Part-time workers show a structurally different pattern to full-time employees",
+    x        = "Age group",
+    y        = "Median GPG (%)",
+    caption  = "Source: ONS ASHE 2025"
+  ) +
+  theme_gpg()
+```
+
+> **Key finding:** The gap is near-zero for workers aged 16–29, then rises 
+> sharply between the 22–29 and 40–49 brackets.
+
+
+
+# 5. GPG by Industry
+
+```{r plot-industry, fig.height=7, fig.cap="Figure 4: Median GPG by industry"}
+p4_data <- df_industry_clean %>%
+  filter(emp_type == "All") %>%
+  arrange(gpg_median) %>%
+  mutate(short_label = factor(short_label, levels = short_label))
+
+ggplot(p4_data, aes(x = short_label, y = gpg_median, fill = gpg_median)) +
+  geom_col(show.legend = FALSE) +
+  geom_hline(yintercept = 12.8, linetype = "dotted",
+             colour = COL_POS, linewidth = 0.8) +
+  annotate("text", x = 2, y = 13.8,
+           label = "UK average (12.8%)",
+           colour = COL_POS, size = 3.2) +
+  geom_text(aes(label = paste0(round(gpg_median, 1), "%"),
+                hjust = ifelse(gpg_median >= 0, -0.15, 1.15)),
+            size = 3.2) +
+  scale_fill_gradient2(low = COL_NEG, mid = "grey90",
+                       high = COL_POS, midpoint = 0) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(-5, 32)) +
+  coord_flip() +
+  labs(
+    title    = "Gender pay gap by industry, 2025 (all employees, median)",
+    subtitle = "Financial & insurance activities has the largest gap — more than double the UK average",
+    x        = NULL,
+    y        = "Median GPG (%)",
+    caption  = "Source: ONS ASHE 2025"
+  ) +
+  theme_gpg()
+```
+
+```{r industry-table}
+df_industry_clean %>%
+  filter(emp_type == "All") %>%
+  arrange(desc(gpg_median)) %>%
+  select(Industry = short_label,
+         `Median GPG (%)` = gpg_median,
+         `Mean GPG (%)` = gpg_mean) %>%
+  mutate(across(where(is.numeric), ~ round(., 1))) %>%
+  knitr::kable(caption = "Table 2: GPG by industry, all employees (sorted by median GPG)")
+```
+
+> **Key finding:** Financial & insurance activities (27.2%) has a gap more 
+> than double the national average, likely driven by a highly male-dominated 
+> senior workforce. Water & sewerage (−1.5%) is the only sector where women 
+> out-earn men on the median.
+
+
+
+# 6. GPG by Occupation
+
+```{r plot-occupation, fig.cap="Figure 5: Median GPG by occupation group"}
+p5_data <- df_occupation_clean %>%
+  filter(emp_type == "All") %>%
+  arrange(gpg_median) %>%
+  mutate(description = factor(description, levels = description))
+
+ggplot(p5_data, aes(x = description, y = gpg_median, fill = gpg_median)) +
+  geom_col(show.legend = FALSE) +
+  geom_hline(yintercept = 12.8, linetype = "dotted",
+             colour = COL_POS, linewidth = 0.8) +
+  annotate("text", x = 2, y = 13.8,
+           label = "UK average (12.8%)",
+           colour = COL_POS, size = 3.2) +
+  geom_text(aes(label = paste0(round(gpg_median, 1), "%"),
+                hjust = ifelse(gpg_median >= 0, -0.15, 1.15)),
+            size = 3.5) +
+  scale_fill_gradient2(low = COL_NEG, mid = "grey90",
+                       high = COL_POS, midpoint = 0) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(0, 20)) +
+  coord_flip() +
+  labs(
+    title    = "Gender pay gap by occupation group, 2025 (all employees, median)",
+    subtitle = "Skilled trades and associate professionals show the largest within-occupation gaps",
+    x        = NULL,
+    y        = "Median GPG (%)",
+    caption  = "Source: ONS ASHE 2025"
+  ) +
+  theme_gpg()
+```
+
+
+
+# 7. GPG by Region
+
+```{r plot-region, fig.cap="Figure 6: GPG by UK region — median vs mean"}
+df_region_clean %>%
+  filter(emp_type == "All") %>%
+  pivot_longer(cols = c(gpg_median, gpg_mean),
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = recode(metric,
+                         gpg_median = "Median GPG",
+                         gpg_mean   = "Mean GPG")) %>%
+  ggplot(aes(x = description, y = value, fill = metric)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_hline(yintercept = 12.8, linetype = "dotted",
+             colour = "grey40", linewidth = 0.8) +
+  scale_fill_manual(values = c("Median GPG" = COL_MEDIAN,
+                               "Mean GPG"   = COL_MEAN)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  coord_flip() +
+  labs(
+    title    = "Gender pay gap by UK region, 2025 (all employees)",
+    subtitle = "London's mean gap (17.8%) far exceeds its median (11.8%) — a sign of high-earner skew",
+    x        = NULL,
+    y        = "GPG (%)",
+    caption  = "Source: ONS ASHE 2025"
+  ) +
+  theme_gpg()
+```
+
+> **Key finding:** London shows the largest divergence between median (11.8%) 
+> and mean (17.8%) GPG of any region. This gap between the two metrics signals 
+> a right-skewed pay distribution — a small number of very high-earning men 
+> pull the mean upward without affecting the median.
+
+
+
+# 8. Public vs Private Sector
+
+```{r plot-pubpriv, fig.cap="Figure 7: GPG by sector and employment type"}
+df_pubpriv_clean %>%
+  pivot_longer(cols = c(gpg_median, gpg_mean),
+               names_to = "metric", values_to = "value") %>%
+  mutate(
+    metric   = recode(metric,
+                      gpg_median = "Median GPG",
+                      gpg_mean   = "Mean GPG"),
+    emp_type = factor(emp_type,
+                      levels = c("All", "Full-Time", "Part-Time"))
+  ) %>%
+  ggplot(aes(x = description, y = value, fill = metric)) +
+  geom_col(position = "dodge", width = 0.65) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  scale_fill_manual(values = c("Median GPG" = COL_MEDIAN,
+                               "Mean GPG"   = COL_MEAN)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  facet_wrap(~ emp_type, ncol = 3) +
+  labs(
+    title    = "Gender pay gap by sector and employment type, 2025",
+    subtitle = "Private sector shows a consistently wider gap across all employment types",
+    x        = NULL,
+    y        = "GPG (%)",
+    caption  = "Source: ONS ASHE 2025"
+  ) +
+  theme_gpg() +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
