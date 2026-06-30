@@ -1,0 +1,374 @@
+---
+title: "Multilevel Modelling of the UK Gender Pay Gap"
+subtitle: "ASHE 2025 — Annual Survey of Hours and Earnings"
+author: "Melvin Jiji Thomas"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 8,
+  fig.height = 5
+)
+```
+
+---
+
+# Introduction
+
+## Why multilevel modelling?
+
+This analysis uses data from the UK Office for National Statistics **Annual Survey of Hours and Earnings (ASHE) 2025**, which reports the gender pay gap (GPG) — defined as the percentage difference between men's and women's median hourly earnings — broken down by region and age group.
+
+The data has a clear **two-level hierarchical structure**:
+
+- **Level 1 (within groups):** Age groups (18–21, 22–29, 30–39, 40–49, 50–59, 60+) — the unit of observation
+- **Level 2 (between groups):** UK regions (North East, London, Scotland, etc.) — the clustering variable
+
+Ordinary least squares (OLS) regression assumes all observations are independent. Here, age-group GPG values within the same region are likely to be more similar to each other than to values from other regions (due to shared local labour market conditions, industry mix, etc.). This violates OLS independence assumptions and inflates Type I error rates.
+
+Multilevel models — also called **mixed-effects** or **hierarchical linear models** — explicitly model this nested structure. They partition variance into between-region and within-region components, and allow us to ask:
+
+1. How much of the variation in GPG is between regions versus within regions across age groups? (Null model / ICC)
+2. Does age group predict GPG after accounting for regional clustering? (Random intercept model)
+3. Does the effect of age on GPG vary by region? (Random slope model)
+4. Does the regional GPG context moderate the age–GPG relationship? (Cross-level interaction)
+
+## Data source
+
+```
+Source: Annual Survey of Hours and Earnings, Office for National Statistics, 2025
+Table:  WGOR_Age (Work Region × Age Group) — Median Gender Pay Gap (%)
+        Table 25   (Work Region overall GPG) — used as Level 2 predictor
+```
+
+---
+
+# Setup
+
+## Packages
+
+```{r packages}
+# Core multilevel modelling
+library(lme4)       # lmer() — fits linear mixed-effects models
+library(lmerTest)   # Adds p-values and df approximation to lmer output
+
+# Data wrangling and visualisation
+library(tidyverse)  # dplyr, ggplot2, tidyr, stringr, purrr
+
+# Model output and diagnostics
+library(broom.mixed)   # tidy() and glance() for lmer objects
+library(performance)   # icc() — intraclass correlation coefficient
+library(lattice)       # dotplot() for caterpillar plots of random effects
+library(readxl)
+```
+
+---
+
+# Data Preparation
+
+## Build the dataset
+
+
+```{r build-data}
+# ── Read the raw "All" sheet
+raw <- read_excel(
+  "D:/Maynooth/M.Sc Final Project/DataSet/ashegenderpaygap2025provisional/PROV - Work Region Age Table WGOR Age.12  Gender pay gap 2025.xlsx",
+  sheet = "All", skip = 3, col_names = TRUE
+)[, 1:4]
+
+colnames(raw) <- c("description", "code", "gpg_median", "gpg_mean")
+
+raw <- raw %>%
+  filter(!is.na(description)) %>%
+  mutate(description = str_trim(description),
+         gpg_median   = as.numeric(gpg_median),
+         gpg_mean     = as.numeric(gpg_mean))
+
+# ── Level 1: Isolate regions, remove UK aggregate, and automate age midpoints
+gpg_data <- raw %>%
+  filter(str_detect(description, ", Age ")) %>%
+  separate(description, into = c("region", "age_group"), sep = ", Age ") %>%
+  filter(region != "United Kingdom") %>%    # FIX #3: Eliminates data leakage
+  select(region, age_group, gpg_median) %>%
+  mutate(
+    # 1. Extract boundaries
+    lower_bound = as.numeric(str_extract(age_group, "^[0-9]+")),
+    upper_bound = as.numeric(str_extract(age_group, "[0-9]+$")),
+    
+    # 2. Calculate continuous midpoint (explicit assumption for 60+)
+    age_midpoint = if_else(age_group == "60+", 
+                           65.0,  
+                           (lower_bound + upper_bound) / 2),
+    
+    # 3. Mean-center for the multilevel model (Fix #2)
+    age_midpoint_c = age_midpoint - mean(age_midpoint, na.rm = TRUE)
+  ) %>%
+  select(-lower_bound, -upper_bound)
+
+glimpse(gpg_data)
+```
+
+---
+
+# Exploratory Data Analysis
+
+Before fitting any models, it is important to visualise the data. This helps us
+understand the shape of the relationships and anticipate what the models should show.
+
+## Overall distribution of GPG
+
+```{r eda-hist}
+ggplot(gpg_data, aes(x = gpg_median)) +
+  geom_histogram(bins = 18, fill = "#2c7bb6", colour = "white", alpha = 0.85) +
+  geom_vline(xintercept = mean(gpg_data$gpg_median, na.rm = TRUE), colour = "#d7191c",
+             linetype = "dashed", linewidth = 0.8) +
+  annotate("text", x = mean(gpg_data$gpg_median, na.rm = TRUE) + 1.5, y = 10,
+           label = paste0("Mean = ", round(mean(gpg_data$gpg_median, na.rm = TRUE), 1), "%"),
+           colour = "#d7191c", size = 3.5) +
+  labs(title    = "Distribution of median gender pay gap across all region-age cells",
+       subtitle = "ASHE 2025 | n = 66 observations (11 regions x 6 age groups)",
+       x = "Median GPG (%)", y = "Count") +
+  theme_minimal(base_size = 12)
+```
+
+## Between-region variation (Level 2)
+
+```{r eda-region}
+gpg_data%>%
+  group_by(region) %>%
+  summarise(mean_gpg = mean(gpg_median), .groups = "drop") %>%
+  ggplot(aes(x = reorder(region, mean_gpg), y = mean_gpg)) +
+  geom_col(fill = "#2c7bb6", alpha = 0.8, width = 0.6) +
+  geom_hline(yintercept = mean(gpg_data$gpg_median), linetype = "dashed",
+             colour = "#d7191c", linewidth = 0.7) +
+  coord_flip() +
+  labs(title    = "Mean GPG by region (average across age groups)",
+       subtitle = "Dashed line = overall mean",
+       x = NULL, y = "Mean median GPG (%)") +
+  theme_minimal(base_size = 12)
+```
+
+**Observation:** There is clear between-region variation. Wales (9.7%) and Scotland (9.4%) have notably lower regional GPG than the South East (15.8%) and West Midlands (15.3%). This suggests Level 2 (region) explains meaningful variance — supporting a multilevel approach.
+
+## Within-region variation by age group (spaghetti plot)
+
+```{r eda-spaghetti}
+ggplot(gpg_data, aes(x = age_group, y = gpg_median,
+               group = region, colour = region)) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+  geom_point(size = 2.5) +
+  labs(title    = "GPG by age group within each UK region",
+       subtitle = "Each line = one region | Parallel lines → random intercept sufficient",
+       x = "Age group", y = "Median GPG (%)",
+       colour = "Region") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 8))
+```
+
+**Observation:** The lines are broadly similar in shape (GPG rises steeply from young to middle age) but differ in level (some regions start higher) and *slightly* in slope (South East steepens more sharply than Wales). This pattern motivates both a random intercept model and a test for random slopes.
+
+---
+
+# Multilevel Models
+
+## Model 0: Null model (unconditional means)
+
+### What this model does
+
+The null model contains **no predictors**. It simply partitions total variance in GPG
+into two components:
+
+- **Between-region variance** (σ²_u0): how much regions differ from the grand mean
+- **Within-region variance** (σ²_e): how much age groups vary within a region
+
+The **Intraclass Correlation Coefficient (ICC)** is then calculated as:
+
+$$\text{ICC} = \frac{\sigma^2_{u0}}{\sigma^2_{u0} + \sigma^2_e}$$
+
+An ICC > 0.05–0.10 justifies a multilevel approach.
+
+The null model formula is:
+
+$$\text{GPG}_{ij} = \beta_0 + u_{0j} + e_{ij}$$
+
+where *i* = age group, *j* = region, β₀ = grand mean, u₀j = region deviation, e_ij = residual.
+
+```{r m0}
+m0 <- lmer(gpg_median ~ 1 + (1 | region),
+           data = gpg_data,
+           REML = FALSE)   # ML estimation for model comparison via LRT
+
+summary(m0)
+```
+
+### ICC calculation
+
+```{r m0-icc}
+icc_result <- icc(m0)
+print(icc_result)
+
+# Manual calculation for transparency
+var_region   <- as.data.frame(VarCorr(m0))$vcov[1]
+var_residual <- as.data.frame(VarCorr(m0))$vcov[2]
+icc_manual   <- var_region / (var_region + var_residual)
+
+cat("\n--- Variance partition ---\n")
+cat("Between-region variance (σ²_u0):", round(var_region, 3), "\n")
+cat("Within-region variance  (σ²_e): ", round(var_residual, 3), "\n")
+cat("ICC =", round(icc_manual, 3),
+    "→", round(icc_manual * 100, 1), "% of variance is between regions\n")
+```
+
+**Interpretation:** The ICC tells us what proportion of the total variance in GPG is attributable to differences *between* regions. If this is, say, 0.30, it means 30% of variation cannot be explained at the age-group level alone — region matters, and a multilevel model is warranted.
+
+---
+
+## Model 1: Random intercept model
+
+### What this model does
+
+We now add **age group** as a Level 1 (within-region) fixed effect. The intercept is
+still allowed to vary randomly across regions (each region gets its own baseline GPG
+level), but the *slope* of age is assumed the same everywhere.
+
+$$\text{GPG}_{ij} = \beta_0 + \beta_1 \cdot \text{age\_num\_c}_{ij} + u_{0j} + e_{ij}$$
+
+```{r m1}
+m1 <- lmer(gpg_median ~ age_midpoint_c + (1 | region),
+           data = gpg_data,
+           REML = FALSE)
+
+summary(m1)
+```
+
+
+### Model comparison: M0 vs M1
+
+```{r m0-m1-lrt}
+anova(m0, m1)
+```
+
+**Interpretation:** The likelihood ratio test compares the null model to the random intercept model. A significant chi-square (p < .05) confirms that age group improves model fit — i.e., age is a meaningful predictor of GPG even after accounting for regional clustering.
+
+
+
+## Model 2: Random slope model
+
+### What this model does
+
+So far we have assumed the relationship between age and GPG is the *same* across all
+regions. The random slope model relaxes this: it allows each region to have both its
+own baseline GPG level (random intercept) **and** its own age–GPG gradient
+(random slope).
+
+$$\text{GPG}_{ij} = \beta_0 + \beta_1 \cdot \text{age\_num\_c}_{ij} + (u_{0j} + u_{1j} \cdot \text{age\_num\_c}_{ij}) + e_{ij}$$
+
+where u₁j is the region-specific deviation from the average age slope.
+
+```{r m3}
+m2 <- lmer(gpg_median ~ age_midpoint_c + (age_midpoint_c | region),
+           data = gpg_data,
+           REML = FALSE)
+
+summary(m2)
+```
+
+### Test for random slopes
+
+```{r m3-lrt}
+anova(m1, m2)
+```
+
+**Interpretation:** If the likelihood ratio test is significant, the age–GPG slope
+genuinely varies by region — i.e., the effect of ageing on the pay gap differs
+across the UK. If not, the simpler random intercept model (M1) is preferred.
+
+
+
+# Model Comparison
+
+```{r model-comparison}
+# Collect AIC, BIC, logLik for all models
+model_list <- list(
+  "M0: Null"                     = m0,
+  "M1: Random intercept + age"   = m1,
+  "M2: Random slope"             = m2
+)
+
+comparison <- map_dfr(model_list, glance, .id = "Model") %>%
+  select(Model, AIC, BIC, logLik, deviance) %>%
+  mutate(across(where(is.numeric), ~round(., 2)),
+         ΔAIC = round(AIC - min(AIC), 2))
+
+knitr::kable(comparison,
+             caption = "Model fit statistics — lower AIC/BIC indicates better fit",
+             align   = c("l","r","r","r","r","r"))
+
+m1_final <- lmer(gpg_median ~ age_midpoint_c + (1 | region),
+                 data = gpg_data,
+                 REML = TRUE)
+summary(m1_final)
+
+```
+
+
+### Fixed effects plot
+
+```{r m1-fe-plot}
+tidy(m1_final, conf.int = TRUE, effects = "fixed") %>%  
+  filter(term != "(Intercept)") %>%  
+  ggplot(aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high)) +  
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +  
+  geom_errorbar(width = 0.15, colour = "#2c7bb6", linewidth = 0.8) +  
+  geom_point(size = 4, colour = "#2c7bb6") +  
+  labs(title    = "Fixed effect of age on GPG (Model 1: Random intercept)",       
+       subtitle = "age_midpoint_c centred; each unit = one year of age",       
+       x = "Predictor", 
+       y = "Estimated effect on GPG (%)") +  
+  scale_x_discrete(labels = c("age_midpoint_c" = "Age (Years)")) + # Cleans up the X-axis label
+  theme_minimal(base_size = 12)
+```
+
+**How to read this table:**
+
+- **AIC / BIC:** Lower values indicate better model fit, penalised for complexity. ΔAIC = difference from the best-fitting model.
+- **logLik:** Log-likelihood; higher (less negative) is better.
+- **Deviance:** −2 × logLik; used in likelihood ratio tests between nested models.
+
+The preferred model is the one with the lowest AIC/BIC that is also theoretically justified and whose added complexity is supported by a significant LRT.
+
+---
+
+---
+
+# Summary of Findings
+
+```{r findings-table}
+findings <- tribble(
+  ~Model, ~Key_Finding,
+  "M0: Null",           "ICC indicates X% of variance in GPG is between regions — multilevel modelling is justified",
+  "M1: Rand. intercept","Age group is a significant predictor; GPG rises sharply from young to middle-aged workers across all regions",
+  "M2: Rand. slope",    "The age–GPG slope does / does not vary significantly across regions (see LRT vs M1)"
+)
+
+knitr::kable(findings,
+             col.names = c("Model", "Key finding"),
+             caption   = "Summary — replace 'is / is not' with your actual results")
+```
+
