@@ -73,7 +73,7 @@ library(broom)
 library(scales)
 library(patchwork)
 
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 source("DataLoading.R")
 source("DataCleaning.R")
 ```

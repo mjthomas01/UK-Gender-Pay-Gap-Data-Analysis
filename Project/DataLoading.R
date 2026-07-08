@@ -30,7 +30,7 @@ load_all_sheets <- function(filename) {
   })
 }
 
-data_path <- "D:/Maynooth/M.Sc Final Project/DataSet/ashegenderpaygap2025provisional/"
+data_path <- "DataSet/ashegenderpaygap2025provisional/"
 
 df_total      <- load_all_sheets(paste0(data_path, "PROV - Total Table 1.12  Gender pay gap 2025.xlsx"))
 df_age        <- load_all_sheets(paste0(data_path, "PROV - Age Group Table 6.12  Gender pay gap 2025.xlsx"))
